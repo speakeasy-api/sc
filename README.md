@@ -80,6 +80,180 @@ step, err := inst.Send(ctx, OpenDoor{})
 
 The same example runs as [`example_test.go`](example_test.go).
 
+## A fuller example
+
+A deploy pipeline that builds an image, tests it, retries flaky tests after a delay, gives up after too many retries or ten minutes, and can be aborted at any point. It uses a compound state, services, guards, timers and final states. The program checks the chart with `Explore`, then runs it with an `Instance` and fake services. It is a complete program, so you can paste it into the [Go playground](https://go.dev/play/) and run it.
+
+```go
+// A deploy pipeline: build an image, test it, retry flaky tests with a
+// delay, give up after too many tries or too much time, and let an operator
+// abort at any point.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/speakeasy-api/sc"
+)
+
+type State string
+
+const (
+	Idle      State = "idle"
+	Deploying State = "deploying" // a compound state: building, then testing
+	Building  State = "building"
+	Testing   State = "testing"
+	Retrying  State = "retrying"
+	Live      State = "live"
+	Failed    State = "failed"
+	Aborted   State = "aborted"
+)
+
+const MaxRetries = 2
+
+type (
+	Deploy struct{ Commit string }
+	Abort  struct{}
+)
+
+type Release struct {
+	Commit  string `json:"commit"`
+	Image   string `json:"image"`
+	Retries int    `json:"retries"`
+}
+
+func NewPipeline(
+	build func(ctx context.Context, commit string) (image string, err error),
+	test func(ctx context.Context, image string) error,
+) (*sc.Machine[State, Release], error) {
+	return sc.New("deploy", func(b *sc.Builder[State, Release]) {
+		b.Initial(Idle)
+
+		b.State(Idle).On[Deploy]().
+			Assign("setCommit", func(r Release, ev Deploy) Release {
+				r.Commit = ev.Commit
+				return r
+			}).
+			To(Deploying)
+
+		deploying := b.State(Deploying, func(b *sc.Builder[State, Release]) {
+			b.Initial(Building)
+
+			// A service runs while its state is active. Leaving the state
+			// (an abort, a timeout) cancels it and discards its result.
+			build := b.State(Building).Invoke("build", func(ctx context.Context, _ *sc.Run, r Release) (string, error) {
+				return build(ctx, r.Commit)
+			})
+			build.OnDone().
+				Assign("setImage", func(r Release, d sc.Done[string]) Release {
+					r.Image = d.Result
+					return r
+				}).
+				To(Testing)
+			build.OnError().To(Failed)
+
+			test := b.State(Testing).Invoke("test", func(ctx context.Context, _ *sc.Run, r Release) (struct{}, error) {
+				return struct{}{}, test(ctx, r.Image)
+			})
+			test.OnDone().To(Live)
+			// Guarded transitions are tried in order: retry while we can,
+			// otherwise fail.
+			test.OnError().
+				When("canRetry", func(r Release, _ sc.Failed) bool { return r.Retries < MaxRetries }).
+				Assign("countRetry", func(r Release, _ sc.Failed) Release {
+					r.Retries++
+					return r
+				}).
+				To(Retrying)
+			test.OnError().To(Failed)
+
+			b.State(Retrying).After(time.Second).To(Testing)
+		})
+		// Transitions on the parent apply in every child state.
+		deploying.On[Abort]().To(Aborted)
+		deploying.After(10 * time.Minute).To(Failed)
+
+		b.Final(Live)
+		b.Final(Failed)
+		b.Final(Aborted)
+	})
+}
+
+func main() {
+	ctx := context.Background()
+
+	// Fake services: the build always works, the tests fail once.
+	runs := 0
+	pipeline, err := NewPipeline(
+		func(context.Context, string) (string, error) { return "registry/app:abc123", nil },
+		func(context.Context, string) error {
+			if runs++; runs == 1 {
+				return errors.New("flaky test")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	// 1. Check the chart before running it: explore every state reachable
+	// under these events and service outcomes.
+	report, err := pipeline.Explore(Release{}, sc.Exploration[State, Release]{
+		Events: []any{Deploy{Commit: "abc123"}, Abort{}},
+		Outcomes: map[string][]sc.Outcome{
+			"build": {sc.Succeeds("registry/app:abc123"), sc.Fails(errors.New("compile error"))},
+			"test":  {sc.Succeeds(struct{}{}), sc.Fails(errors.New("flaky test"))},
+		},
+		Invariants: []sc.Invariant[State, Release]{
+			{Name: "live releases have an image", Holds: func(s sc.Snapshot[State, Release]) bool {
+				return !s.In(Live) || s.Context.Image != ""
+			}},
+			{Name: "retries are bounded", Holds: func(s sc.Snapshot[State, Release]) bool {
+				return s.Context.Retries <= MaxRetries
+			}},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("explored %d states: %d violations, %d trapped\n",
+		report.States, len(report.Violations), len(report.Trapped))
+
+	// 2. Run it. The Instance runs services on their own goroutines and
+	// fires timers from the clock.
+	inst, err := pipeline.Instance(ctx, Release{})
+	if err != nil {
+		panic(err)
+	}
+	defer inst.Close()
+
+	step, err := inst.Send(ctx, Deploy{Commit: "abc123"})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("after deploy:", step.To.Active())
+
+	final, err := inst.Await(ctx, func(s sc.Snapshot[State, Release]) bool { return s.Done() })
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("finished in %v with image %s, retries: %d\n",
+		final.Active(), final.Context.Image, final.Context.Retries)
+}
+```
+
+Output:
+
+```
+explored 18 states: 0 violations, 0 trapped
+after deploy: [deploying building]
+finished in [live] with image registry/app:abc123, retries: 1
+```
+
 ## What it covers
 
 - **States**: nested and parallel states, shallow and deep history, final states with typed outputs, eventless transitions, tags, and guards on other active states.
