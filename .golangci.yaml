@@ -1,0 +1,91 @@
+# yaml-language-server: $schema=https://golangci-lint.run/jsonschema/golangci.jsonschema.json
+
+version: "2"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+run:
+  relative-path-mode: wd
+
+linters:
+  enable:
+    - bodyclose
+    - containedctx
+    - depguard
+    - durationcheck
+    - errcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - exhaustruct
+    - exptostd
+    - forbidigo
+    - forcetypeassert
+    - gochecksumtype
+    - gocritic
+    - gosec
+    - govet
+    - iface
+    - importas
+    - ineffassign
+    - mirror
+    - nolintlint
+    - paralleltest
+    - predeclared
+    - reassign
+    - sqlclosecheck
+    - staticcheck
+    - testifylint
+    - thelper
+    - tparallel
+    - unconvert
+    - unused
+    - usetesting
+    - wrapcheck
+
+  exclusions:
+    rules:
+      # Tests favor terse partial struct literals.
+      - path: _test\.go
+        linters:
+          - exhaustruct
+
+  settings:
+    wrapcheck:
+      ignore-sigs:
+        - "errors.New("
+        - "errors.Join("
+        - "fmt.Errorf("
+    depguard:
+      rules:
+        main:
+          list-mode: lax
+          deny:
+            - pkg: "math/rand$"
+              desc: use math/rand/v2
+            - pkg: "github.com/jackc/pgx/v4"
+              desc: Use github.com/jackc/pgx/v5
+            - pkg: "github.com/pkg/errors"
+              desc: Should be replaced by standard lib errors package
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^time\.Sleep$
+          pkg: ^time$
+          msg: "Avoid time.Sleep. In tests, poll with require.EventuallyWithT (wait until assertions pass) or require.Never (assert a condition never holds)."
+    gosec:
+      excludes:
+        # The taint analysis added in gosec v2.23.0 reports many false
+        # positives, and marking each one with `#nosec` would defeat the
+        # point of the linter. These rules stay off until a newer gosec
+        # release is reviewed.
+        - G703
+        - G704
+        - G705
+    exhaustive:
+      check:
+        - switch
+        - mapliteral
+      default-signifies-exhaustive: true

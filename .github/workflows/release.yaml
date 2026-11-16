@@ -1,0 +1,100 @@
+# Releases sc when you run it by hand from main. A Go module is released by
+# its tag alone; nothing is built or uploaded. communique writes the notes.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "patch, or minor for a breaking change"
+        type: choice
+        options: [patch, minor]
+        default: patch
+      version:
+        description: "Exact version such as 0.4.0 (overrides bump)"
+        type: string
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag and release
+    if: ${{ github.ref == 'refs/heads/main' }}
+    # ANTHROPIC_API_KEY lives in this environment, which only main can use.
+    environment: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # create the tag and the GitHub release
+      pull-requests: read # communique reads the PRs in the release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up mise
+        uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          install_args: go communique
+          cache: false
+
+      # Check before tagging, so a release never goes out without notes.
+      - name: Check that communique can reach Anthropic
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "error: set the ANTHROPIC_API_KEY repository secret" >&2
+            exit 1
+          fi
+          code="$(curl -sS -o /dev/null -w '%{http_code}' https://api.anthropic.com/v1/models \
+            -H "anthropic-version: 2023-06-01" -H "x-api-key: $ANTHROPIC_API_KEY")"
+          if [ "$code" != 200 ]; then
+            echo "error: Anthropic rejected ANTHROPIC_API_KEY (HTTP $code)" >&2
+            exit 1
+          fi
+
+      - name: Work out the version
+        id: version
+        env:
+          BUMP: ${{ inputs.version || inputs.bump }}
+        run: |
+          version="$(mise run -q release:next "$BUMP")"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      # GitHub's generated notes stay in place if communique fails below.
+      - name: Create the tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes
+          # communique reads the release range from local history.
+          git tag "$TAG" "$GITHUB_SHA"
+
+      # The public proxy cannot read a private repository.
+      - name: Ask the Go module proxy to fetch the release
+        if: ${{ !github.event.repository.private }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          GOPROXY=https://proxy.golang.org GOFLAGS=-mod=mod go list -m "github.com/speakeasy-api/sc@$TAG"
+
+      # To retry by hand: communique generate "$TAG" --github-release
+      - name: Write the release notes
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: communique generate "$TAG" --github-release

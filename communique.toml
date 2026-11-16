@@ -1,0 +1,22 @@
+# communique writes the GitHub release notes when release.yaml tags a version.
+# sc has no CHANGELOG.md; the GitHub releases are the changelog.
+
+context = """
+sc is a Go statechart library, a best-effort port inspired by XState. It has a
+pure transition core, in-memory and Postgres drivers (sc/pgdriver),
+OpenTelemetry hooks (sco11y), and exhaustive exploration for checking charts.
+Readers are Go developers who build stateful workflows on sc.
+
+sc stays on 0.x.y. A minor bump can contain breaking changes; a patch bump
+does not. Pull request descriptions hold the author's own summary of each
+change.
+"""
+
+system_extra = """
+Put breaking changes first, with the code a user must change.
+Name the Go identifiers that changed and use their exact spelling.
+Leave out changes to CI, tooling, and docs that users do not see.
+"""
+
+[defaults]
+repo = "speakeasy-api/sc"
